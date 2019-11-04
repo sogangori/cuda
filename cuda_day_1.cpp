@@ -14,9 +14,17 @@ __global__ void add(int* a, int* b, int* c) {
 	//*c = *a + *b;
 	c[0] = a[0] + b[0];
 }
+// global 은 return void 입니다.
+__global__ void vector_add_kernel(int* a, int* b, int* c) {
+	//c[blockIdx.x] = a[blockIdx.x] + b[blockIdx.x]; //<<<size,1>>>
+	//c[threadIdx.x] = a[threadIdx.x] + b[threadIdx.x];//<<<1,size>>>	
+	//             0~7      +  0~3       * 8 blockDim:블록안의 스레드 갯수
+	int index = threadIdx.x + blockIdx.x * blockDim.x; 
+	c[index] = a[index] + b[index];
+}
 
 void vector_add() {
-	int size = 5;
+	int size = 32;
 	int* a, * b, * c;//선언
 	a = (int*)malloc(size * sizeof(int));//할당
 	b = (int*)malloc(size * sizeof(int));
@@ -26,17 +34,14 @@ void vector_add() {
 		b[i] = 10 + i;
 		c[i] = 0;
 	}	
-
 	int* d_a, * d_b, * d_c;//선언
 	cudaMalloc(&d_a, size * sizeof(int));//할당
 	cudaMalloc(&d_b, size * sizeof(int));//할당
 	cudaMalloc(&d_c, size * sizeof(int));//할당
-
 	cudaMemcpy(d_a, a, size * sizeof(int), cudaMemcpyHostToDevice);
 	cudaMemcpy(d_b, b, size * sizeof(int), cudaMemcpyHostToDevice);
-
-	// a+b=c 작업수행
-
+	// a+b=c 작업수행 https://github.com/sogangori/cuda 
+	vector_add_kernel <<<4, 8>>> (d_a, d_b, d_c);
 	cudaMemcpy(c, d_c, size * sizeof(int), cudaMemcpyDeviceToHost);
 	for (int i = 0; i < size i++) {
 		printf("c[i]=%d \n", i, c[i]);
@@ -45,6 +50,7 @@ void vector_add() {
 
 int main()
 {	
+    
 	vector_add();
 
 	int* a, * b, * c;//선언
