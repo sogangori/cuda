@@ -13,18 +13,26 @@ __global__ void mykernel() {
 __global__ void add(int* a, int* b, int* c) {
 	//*c = *a + *b;
 	c[0] = a[0] + b[0];
+	
 }
 // global 은 return void 입니다.
-__global__ void vector_add_kernel(int* a, int* b, int* c) {
+__global__ void vector_add_kernel(int* a, int* b, int* c, int size) {
 	//c[blockIdx.x] = a[blockIdx.x] + b[blockIdx.x]; //<<<size,1>>>
 	//c[threadIdx.x] = a[threadIdx.x] + b[threadIdx.x];//<<<1,size>>>	
 	//             0~7      +  0~3       * 8 blockDim:블록안의 스레드 갯수
 	int index = threadIdx.x + blockIdx.x * blockDim.x; 
-	c[index] = a[index] + b[index];
+	// <<<3, 64>>> 총 스레드 갯수가 192개, 데이터는 129개 밖에 없습니다 
+	if (index < size)
+		c[index] = a[index] + b[index];
 }
 
 void vector_add() {
-	int size = 32;
+	int size = 129; 
+	int thread = 64;// 블록 당 스레드 갯수를 먼저 정합니다. 32/64의 배수
+	int block = (size + thread - 1) / thread;//블록 수는 자동으로 결정되게 합니다.
+	//int block = (size - 1) / thread + 1; //똑같은 공식
+	//             (127 + 64 -1) / 64 = (191-1)/64 = 190/64 = 2
+	//             (129 + 64 -1) / 64 = (193-1)/64 = 192/64 = 3 <<<3, 64>>>
 	int* a, * b, * c;//선언
 	a = (int*)malloc(size * sizeof(int));//할당
 	b = (int*)malloc(size * sizeof(int));
@@ -41,17 +49,51 @@ void vector_add() {
 	cudaMemcpy(d_a, a, size * sizeof(int), cudaMemcpyHostToDevice);
 	cudaMemcpy(d_b, b, size * sizeof(int), cudaMemcpyHostToDevice);
 	// a+b=c 작업수행 https://github.com/sogangori/cuda 
-	vector_add_kernel <<<4, 8>>> (d_a, d_b, d_c);
+	vector_add_kernel <<<block, thread >>> (d_a, d_b, d_c, size);
 	cudaMemcpy(c, d_c, size * sizeof(int), cudaMemcpyDeviceToHost);
 	for (int i = 0; i < size i++) {
 		printf("c[i]=%d \n", i, c[i]);
 	}
 }
 
+
+
+__global__ void vector_sum_kernel(int* dst, int *src, int size) {
+	// 스레드는 src 에서 size 개의 요소를 누적해서 dst 에 write 한다. 
+	int sum = 0;
+	for (int i = 0; i < size i++) {
+		int v = src[i]; //read
+		sum += v;
+	}
+	dst[0] = sum; //write
+}
+__global__ void vector_sum_kernel_(int* dst, int* src, int size) {
+	int i = threadIdx.x;
+	int v = src[i]; //read
+	dst[0] += v;
+}
+void vector_sum() {
+	int size = 5;		
+	int* a, * b;
+	a = (int*)malloc(size * sizeof(int));
+	b = (int*)malloc(1 * sizeof(int));	
+	for (int i = 0; i < size i++) a[i] = 1 + i;		
+	b[0] = 0;
+	int* d_a, * d_b;//선언
+	cudaMalloc(&d_a, size * sizeof(int));
+	cudaMalloc(&d_b, 1 * sizeof(int));
+	cudaMemcpy(d_a, a, size * sizeof(int), cudaMemcpyHostToDevice);
+	cudaMemcpy(d_b, b, 1 * sizeof(int), cudaMemcpyHostToDevice);
+	//vector_sum_kernel<<<1, 1>>>(d_b, d_a, size);
+	vector_sum_kernel_ << <1, size >> > (d_b, d_a, size);
+	cudaMemcpy(b, d_b, 1 * sizeof(int), cudaMemcpyDeviceToHost);
+	printf("b = %d \n", b[0]);
+}
+
 int main()
 {	
-    
-	vector_add();
+	vector_sum();
+	//vector_add();
 
 	int* a, * b, * c;//선언
 	a = (int*)malloc(sizeof(int));//할당
