@@ -66,7 +66,19 @@ void filter_1d(){
 	for (int i = 0; i < out_length; i++)
 		printf("%d %f\n", i, dst_h[i]);
 }
-
+// f=3, w=6, out_w=4
+__global__ void filter_2d_kernel(float*dst, float*src, float*filter, int f, int w, int out_w){
+	int bx = blockIdx.x; //0, 1
+	int tx = threadIdx.x;//0,1,2,3
+	float sum = 0;
+	for (int i = 0; i < f; i++)//f=3
+	{	
+		// 0블록/0쓰레드는 (0,1,2), 1블록/0번쓰레드는 (6,7,8)...
+		sum += src[bx * w + tx + i] * filter[i];
+	}
+	// 0블록/0쓰레드는 (0)에 값을 쓰기, 1블록/0번쓰레드는 (4) 에 값을 써야한다
+	dst[bx * out_w + tx] = sum;
+}
 void filter_2d(){
 	int w = 6, h = 2, f = 3;//신호의 길이 6, 신호의 갯수 2개 
 	int out_length = h * (w - (f / 2) * 2);// 2 * 4
@@ -83,7 +95,7 @@ void filter_2d(){
 	for (int i = 0; i < f; i++) filter_h[i] = 1;//필터 계수 
 	cudaMemcpy(src_d, src_h, h * w*sizeof(float), cudaMemcpyHostToDevice);
 	cudaMemcpy(filter_d, filter_h, f*sizeof(float), cudaMemcpyHostToDevice);
-	filter_1d_kernel << <1, out_length >> >(dst_d, src_d, filter_d, f);
+	filter_2d_kernel <<<2, 4 >>>(dst_d, src_d, filter_d, f, w, 4);
 	cudaMemcpy(dst_h, dst_d, out_length*sizeof(float), cudaMemcpyDeviceToHost);
 	for (int i = 0; i < out_length; i++)
 		printf("%d %f\n", i, dst_h[i]);
