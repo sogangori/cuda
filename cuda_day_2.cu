@@ -2,6 +2,7 @@
 #include "device_launch_parameters.h"
 #include <stdio.h>
 #include <malloc.h>
+#include <curand.h>
 
 __global__ void mat_sum_by_row(
 	float* dst, float*src,int stride){
@@ -90,6 +91,9 @@ void checkCudaErrors(cudaError_t error){
 	if (error != cudaError::cudaSuccess)
 		printf("error : %d %s \n", error, cudaGetErrorString(cudaGetLastError()));
 }
+void cudaCheck(cudaError_t error){
+	checkCudaErrors(error);
+}
 
 void filter_2d(){
 	int w = 6, h = 2, f = 3;//신호의 길이 6, 신호의 갯수 2개 
@@ -113,7 +117,6 @@ void filter_2d(){
 		printf("%d %f\n", i, dst_h[i]);
 }
 
-
 __constant__ int a_gpu = 1; // GPU에서 사용하는 상수, 캐시 가능, 64kb 제한
 __constant__ int k_gpu[] = { 1, 2, 3, 4, 5 }; //정적할당
 const int a = 1; //상수 
@@ -133,6 +136,7 @@ __global__ void hello_kernel(int* src){
 __host__ void device_query(){
 	//multi-gpu 일때 각각 다른 명령을 전달할때 사용합니다
 	int count = 0;
+	cudaGetDevice(&count); // 내가 지금 쓰고있는 gpu 몇번?
 	cudaGetDeviceCount(&count); //gpu 갯수 
 	printf("gpu count : %d\n", count);
 	cudaDeviceProp prop;
@@ -143,7 +147,7 @@ __host__ void device_query(){
 	
 	
 	int *gpu_0, *gpu_1;
-
+	
 	cudaSetDevice(0); // gpu 0번을 사용하겠다. 이후의 모든 명령은 gpu 0에서만 수행됩니다
 	cudaMalloc(&gpu_0, 100); // gpu 0 에 할당
 	hello_kernel << <1, 1 >> >(gpu_0); // gpu 0에서 동작
@@ -154,18 +158,31 @@ __host__ void device_query(){
 }
 
 __device__ float mean(float2 src){
-	return (src.x + src.y) * 0.5;
+	// __ 함수 : Intrinsics 속도는 빠르고 정밀도는 약간 떨어집니다 : Fast math 함수
+	//return sqrt(pow(src.x, src.y)) + __cosf(src.x); //cuda math
+	//return (src.x + src.y) * 0.5;
+	double a = 3.0;
+	return __fadd_rn(src.x, src.y) * 0.5;
+	//Thrust 에서 정렬 지원, 
 }
+
 __global__ void channel_mean_kernel(float *dst, float2 *src){
-	//<< < m, dim3(h, w, 1) >> >
-	int bx = blockIdx.x; // 0, 1
+	//<< < m, dim3(w, h, z) >> >  h * w * z <= 1024
+	int bx = blockIdx.x;  // 0, 1
 	int ty = threadIdx.y; // 0, 1
 	int tx = threadIdx.x; // 0, 1, 2, 3 
 	
 	// 0~15, 8:블록의 스레드 갯수, 4:블록의 한 행의 스레드 갯수
 	int index = (bx * blockDim.x * blockDim.y) + (ty * blockDim.x) + tx;
-	//printf("index %d \n", index);
-	dst[index] = mean(src[index]);
+	int a = 10;
+	int b = 10;
+	int temp[25];// 정적 배열 선언 : 그렇게 느리지 않습니다.
+	int *temp2;// 동적 배열 선언 
+	// new, malloc 기피
+	temp2 = (int*)malloc(100); // 매우 느립니다,필요한 스크래치 버퍼를cudaMalloc 해서 인자로 받자  
+	temp2[index] = dst[index];
+	temp[index] = dst[index]; // 영향을 주지 않는 코드는 컴파일러가 제거합니다 
+	dst[index] = mean(src[index]) + temp[index] + temp2[index];
 }
 
 __host__ void channel_mean(){
@@ -181,20 +198,88 @@ __host__ void channel_mean(){
 		src_h[i].x = i * 2;
 		src_h[i].y = i * 2 + 1;
 	}
-	cudaMemcpy(src_d, src_h, m * h * w * sizeof(float2), cudaMemcpyHostToDevice);
+	
+	cudaMemcpy(src_d, src_h, m * h * w * sizeof(float2), cudaMemcpyHostToDevice);	
 	//연산
-	channel_mean_kernel <<< m,dim3(h, w, 1)>>>(dst_d, src_d);
+	cudaEvent_t start, stop;//구조체 선언, 전역으로 선언해서 사용하세요
+	cudaEventCreate(&start);//구조체 초기화
+	cudaEventCreate(&stop);
+	cudaEventRecord(start);//시작 시간 기록
+	channel_mean_kernel <<< m,dim3(w, h, 1)>>>(dst_d, src_d);
+	cudaEventRecord(stop);//끝 시간 기록
+	cudaEventSynchronize(stop);
+	float elapsedTime;
+	cudaEventElapsedTime(&elapsedTime, start, stop);// 차이 가져오기
+	printf("elapsedTime : %f ms \n", elapsedTime);
+	
 	cudaMemcpy(dst_h, dst_d, m * h * w * sizeof(float), cudaMemcpyDeviceToHost);
 	for (int i = 0; i < m * h * w; i++)
 		printf("%d %f \n", i, dst_h[i]);
 }
 
+__global__ void max_kernel(float *dst, float *src){
+	int tx = threadIdx.x;
+	//src[tx];
+	printf("%f %f \n", dst[0], src[tx]);
+	//float atomicAdd(float *address 값을 누적할 주소, float val 값)	
+	float old = atomicAdd(dst, src[tx]); //속도가 조금 늘립니다. 의외로 빠릅니다.	
+	printf("%f %f \n", old, dst[0]);
+}
+
+__host__ void atomic_func(){
+	// 원자 연산, 멀티 스레드 환경에서 race condition(경쟁 조건) 문제를 피하기 위해 사용
+	// sum, max, min 등의 작업을 할때 스레드들이 순차적으로 작업을 할 수 있게 해줍니다
+
+	int size = 5;
+	float *src_h, *src_d;
+	float sum_h = 0, *sum_d;
+	src_h = (float*)malloc(size * sizeof(float));	
+	cudaMalloc(&src_d, size * sizeof(float));
+	cudaMalloc(&sum_d, 1 * sizeof(float));
+	for (int i = 0; i < size; i++) src_h[i] = i;//{0,1,2,3,4}
+	cudaMemcpy(src_d, src_h, size * sizeof(float), cudaMemcpyHostToDevice);
+	cudaMemset(sum_d, 0, sizeof(float));
+	max_kernel << <1, size >> >(sum_d, src_d);
+	cudaMemcpy(&sum_h, sum_d, sizeof(float), cudaMemcpyDeviceToHost);
+	printf("sum : %f \n", sum_h);
+}
+
+void check_curand(curandStatus_t status){
+	printf("status %d \n", status);
+}
+void curand(){
+	size_t n = 100;
+	curandGenerator_t gen;
+	float *devData, *hostData;
+	/* Allocate n floats on host */
+	hostData = (float *)calloc(n, sizeof(float));
+	/* Allocate n floats on device */
+	cudaMalloc((void **)&devData, n * sizeof(float));
+		
+	check_curand(curandCreateGenerator(&gen, CURAND_RNG_PSEUDO_DEFAULT));	
+	curandSetPseudoRandomGeneratorSeed(gen, 1234ULL);
+	/* Generate n floats on device */
+	curandGenerateUniform(gen, devData, n);
+	//curandGenerateNormal(gen, devData, n, 0.0f, 1.0f);
+	/* Copy device memory to host */
+	cudaMemcpy(hostData, devData, n * sizeof(float), cudaMemcpyDeviceToHost);
+	/* Show result */
+	for (int i = 0; i < n; i++) {
+		printf("%1.4f ", hostData[i]);
+	}
+	printf("\n");
+
+}
+
 int main()
-{   
-	channel_mean();
+{   	
+	curand();
+	//atomic_func();
+	//cuda-memcheck 파일명.exe
+	//channel_mean();
 	//device_query();
 	//filter_2d();
 	//filter_1d();
 	//matrix_sum_by_row();
-    return 0;
+    return 0;// 프로파일링하려면 return 0 으로 끝나야 합니다. 
 }
