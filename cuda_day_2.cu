@@ -40,19 +40,24 @@ __device__ float multi(float a, float b){
 	return a * b;
 }
 
+const int W = 6;
 __global__ void filter_1d_kernel(float*dst, float*src, float*filter, int f){
 	int tx = threadIdx.x;//0,1,2,3
-	//float sum = 0; // on-chip 속도 빠름
-	dst[tx] = 0;//0으로 초기화가 반드시 되어있어야 한다.
-	for (int i = 0; i < f; i++)//f=3
-	{
-		//off-chip 속도 느림 
-		//dst[tx] += src[tx + i] * filter[i];// 0번쓰레드는 (0,1,2), 1번쓰레드는 (1,2,3)...
-		dst[tx] += multi(src[tx + i], filter[i]);
+	__shared__ float shared_memory[W];//블록 마다 생성됩니다
+	shared_memory[tx] = src[tx];// global memory의 데이터를 공유메모리로 복사
+	if (tx > 1){
+		shared_memory[tx+2] = src[tx+2];
 	}
-	//dst[tx] = sum;
+	__syncthreads();//동기화 : 같은 블록내의 모든 스레드가 작업을 마칠때까지 대기해라
+	float sum = 0; // on-chip 속도 빠름	
+	for (int i = 0; i < f; i++)//f=3
+	{	
+		sum += multi(shared_memory[tx + i], filter[i]);
+	}
+	dst[tx] = sum;
 }
 void filter_1d(){
+	cudaThreadSynchronize();// gpu 별로 동기화
 	int w = 6, f = 3;
 	int out_length = w - (f / 2) * 2;// 4
 	float *src_h, *filter_h, *dst_h;
@@ -77,11 +82,20 @@ void filter_1d(){
 __global__ void filter_2d_kernel(float*dst, float*src, float*filter, int f, int w, int out_w){
 	int bx = blockIdx.x; //0, 1
 	int tx = threadIdx.x;//0,1,2,3
+	// src (2, 6) 총 12개의 데이터
+	__shared__ float shared_memory[W];//W = 6
+	// 0번 블록 스레드 0,1,2,3 : src[0~5]  의 데이터를 블록0의 공유메모리로 복사
+	// 1번 블록 스레드 0,1,2,3 : src[6~11] 의 데이터를 블록1의 공유메모리로 복사
+	shared_memory[tx] = src[bx * W + tx]; //src[0~3], src[6~9] 복사 완료
+	if (tx > 1){
+		// 0번 블록의 스레드 2는 src[4] 를 공유메모리[4] 로 옮겨라. 
+		shared_memory[tx + 2] = src[bx * W + tx + 2];
+	}
+	__syncthreads();//블록 별로 따로 동기화
 	float sum = 0;
 	for (int i = 0; i < f; i++)//f=3
-	{	
-		// 0블록/0쓰레드는 (0,1,2), 1블록/0번쓰레드는 (6,7,8)...
-		sum += src[bx * w + tx + i] * filter[i];
+	{			
+		sum += shared_memory[tx + i] * filter[i];
 	}
 	// 0블록/0쓰레드는 (0)에 값을 쓰기, 1블록/0번쓰레드는 (4) 에 값을 써야한다
 	dst[bx * out_w + tx] = sum;
@@ -117,6 +131,7 @@ void filter_2d(){
 		printf("%d %f\n", i, dst_h[i]);
 }
 
+__device__ int globalVar = 10;
 __constant__ int a_gpu = 1; // GPU에서 사용하는 상수, 캐시 가능, 64kb 제한
 __constant__ int k_gpu[] = { 1, 2, 3, 4, 5 }; //정적할당
 const int a = 1; //상수 
@@ -174,12 +189,13 @@ __global__ void channel_mean_kernel(float *dst, float2 *src){
 	
 	// 0~15, 8:블록의 스레드 갯수, 4:블록의 한 행의 스레드 갯수
 	int index = (bx * blockDim.x * blockDim.y) + (ty * blockDim.x) + tx;
-	int a = 10;
+	register int a = 10;//register 메모리(한도 초과시 자동으로 local memory 사용)
 	int b = 10;
-	int temp[25];// 정적 배열 선언 : 그렇게 느리지 않습니다.
-	int *temp2;// 동적 배열 선언 
+	int temp[25];// 정적 배열 선언 : 그렇게 느리지 않습니다. local memory
+	int *temp2;// 동적 배열 선언 local memory
 	// new, malloc 기피
 	temp2 = (int*)malloc(100); // 매우 느립니다,필요한 스크래치 버퍼를cudaMalloc 해서 인자로 받자  
+	free(temp2);
 	temp2[index] = dst[index];
 	temp[index] = dst[index]; // 영향을 주지 않는 코드는 컴파일러가 제거합니다 
 	dst[index] = mean(src[index]) + temp[index] + temp2[index];
@@ -273,12 +289,12 @@ void curand(){
 
 int main()
 {   	
-	curand();
+	//curand();
 	//atomic_func();
 	//cuda-memcheck 파일명.exe
 	//channel_mean();
 	//device_query();
-	//filter_2d();
+	filter_2d();
 	//filter_1d();
 	//matrix_sum_by_row();
     return 0;// 프로파일링하려면 return 0 으로 끝나야 합니다. 
