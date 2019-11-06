@@ -1,5 +1,4 @@
-#include "cuda_runtime.h"
-#include "device_launch_parameters.h"
+#include "cuda_runtime.h"#include "device_launch_parameters.h"
 #include <stdio.h>
 #include <malloc.h>
 #include <curand.h>
@@ -209,6 +208,7 @@ __global__ void channel_mean_kernel(float *dst, float2 *src){
 
 __host__ void channel_mean(){
 	int m = 2, h = 2, w = 4;
+	//uint3
 	float2 *src_h, *src_d;
 	float *dst_h, *dst_d;
 	src_h = (float2*)malloc(m * h * w * sizeof(float2));
@@ -250,13 +250,16 @@ __global__ void max_kernel(float *dst, float *src){
 //src는 16개 값의 배열
 __global__ void sum_kernel(float *dst, float *src){
 	int tx = threadIdx.x;	
-	extern __shared__ float sm[ ];
+	extern __shared__ float sm[ ];	
 	sm[tx] = src[tx];//각자 데이터 1개씩 옮깁니다. 
 	__syncthreads();// 데이터가 전부 복사될때까지 블록별로 대기
 	//blockDim.x = 16
 	for (int i = 1; i < blockDim.x; i *= 2){//i = { 1, 2, 4, 8, 16(x)}
 		if (tx % 2 * i == 0){ // {2*1의 배수, 2*2 의 배수, 2*4 의 배수, 2*8의 배수
-			sm[tx] = sm[tx] + sm[tx + i];
+			sm[tx] = sm[tx] + sm[tx + i];	//A 작업을 하는 스레드 워프[0~31][32~63]		
+		}
+		else{
+			// B 작업을 하는 스레드 워프
 		}
 	}
 	if (tx == 0)
@@ -308,10 +311,97 @@ void curand(){
 
 }
 
+void extern_call(char* src){
+	cudaHostRegister(&src, 100, cudaHostRegisterDefault);
+}
+
+void pinned_memory(){
+	int size = 10000000; // 10Mb
+	char * src_h = (char*)malloc(size);//일반 메모리
+	char * src_h_pin;// 고정된 메모리: raw 데이터에 사용합니다
+	cudaHostAlloc(&src_h_pin, size, cudaHostAllocMapped);
+
+	char * gpu;
+	cudaMalloc(&gpu, size);
+	cudaMemcpy(gpu, src_h, size, cudaMemcpyHostToDevice); 
+	cudaMemcpy(gpu, src_h_pin, size, cudaMemcpyHostToDevice);
+
+	cudaMemcpy(src_h, gpu, size, cudaMemcpyDeviceToHost);
+	cudaMemcpy(src_h_pin, gpu, size, cudaMemcpyDeviceToHost);
+}
+
+__global__ void MyKernel(float* dst, float* src, int size){
+	int index = blockIdx.x * blockDim.x + threadIdx.x;
+	dst[index] = cos(src[index]) + sin(src[index]);
+}
+void stream(){	//3.2.5.5. Streams
+	int size = 100 * 512; 
+	cudaStream_t stream[2]; // 선언
+	for (int i = 0; i < 2; ++i)
+		cudaStreamCreate(&stream[i]); //초기화
+	float* hostPtr;
+	cudaMallocHost(&hostPtr, 2 * size);// malloc 과 동일
+	float * inputDevPtr, *outputDevPtr;
+	cudaMalloc(&inputDevPtr, 2 * size);
+	cudaMalloc(&outputDevPtr, 2 * size);
+
+	for (int i = 0; i < 2; ++i) {
+		cudaMemcpyAsync(inputDevPtr + i * size, hostPtr + i * size,
+			size, cudaMemcpyHostToDevice, stream[i]);
+		MyKernel << <100, 512, 0, stream[i] >> >
+			(outputDevPtr + i * size, inputDevPtr + i * size, size);
+		cudaMemcpyAsync(hostPtr + i * size, outputDevPtr + i * size,
+			size, cudaMemcpyDeviceToHost, stream[i]);
+	}
+	//첫번째 연산 이후에는 스트림을 나눌 필요가 없습니다.(카피가 없으니까)
+	//동기화가 필요없습니다. : default stream에서 (동기화가 걸린 후에) 수행됩니다. 
+	MyKernel << <200, 512>> > (outputDevPtr, inputDevPtr, size);
+}
+
+const int m = 1000;
+struct AOS{
+	float a[3];
+	float b[3];
+	float c[3];
+};
+
+struct SOA{
+	float a[3][m];
+	float b[3][m];
+	float c[3][m];
+};
+__global__ void AOS_function(AOS *aoss){
+	int tx = threadIdx.x;//10개의 쓰레드 
+	AOS aos = aoss[tx];// 쓰레드 하나가 구조체 하나씩 담당해서 작업
+	int sum = aos.a[0] + aos.a[1] + aos.a[2];
+	aos.c[0] = sum;
+}
+__global__ void SOA_function(SOA *soa){
+	int tx = threadIdx.x;//10개의 쓰레드
+	int sum = soa->a[0][tx] + soa->a[1][tx] + soa->a[2][tx];
+	soa->c[0][tx] = sum;
+}
+void data_layout(){
+	
+	AOS aos[m]; // CPU 에서 효율적
+	SOA soa; // GPU 에서 효율적
+	AOS *aos_d;
+	SOA *soa_d;
+	cudaMalloc(&aos_d, m * sizeof(AOS));
+	cudaMalloc(&soa_d, sizeof(SOA));
+	AOS_function << <1, m >> >(aos_d);
+	SOA_function << <1, m >> >(soa_d);
+}
+
 int main()
 {   	
+	data_layout();
+	//GPU - SIMD(T) :Single Instruction(function) Multi Data(Thread)
+	//CPU - MIMD(T) :Multi  Instruction(function) Multi Data(Thread)
+	//stream();
+	//pinned_memory();
 	//curand();
-	atomic_func();
+	//atomic_func();
 	//cuda-memcheck 파일명.exe
 	//channel_mean();
 	//device_query();
