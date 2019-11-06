@@ -83,7 +83,12 @@ __global__ void filter_2d_kernel(float*dst, float*src, float*filter, int f, int 
 	int bx = blockIdx.x; //0, 1
 	int tx = threadIdx.x;//0,1,2,3
 	// src (2, 6) 총 12개의 데이터
-	__shared__ float shared_memory[W];//W = 6
+	//__shared__ float shared_memory[W];//정적 공유 메모리
+	//__shared__ int anohter_memory[W];//정적 공유 메모리
+	extern __shared__ float shared_memory[];//동적 공유 메모리 // 2*6*4(byte)
+	//float * first_shared = shared_memory;
+	//int * another_shared = (int*)&shared_memory[6];
+
 	// 0번 블록 스레드 0,1,2,3 : src[0~5]  의 데이터를 블록0의 공유메모리로 복사
 	// 1번 블록 스레드 0,1,2,3 : src[6~11] 의 데이터를 블록1의 공유메모리로 복사
 	shared_memory[tx] = src[bx * W + tx]; //src[0~3], src[6~9] 복사 완료
@@ -125,7 +130,8 @@ void filter_2d(){
 	for (int i = 0; i < f; i++) filter_h[i] = 1;//필터 계수 
 	cudaMemcpy(src_d, src_h, h * w*sizeof(float), cudaMemcpyHostToDevice);
 	cudaMemcpy(filter_d, filter_h, f*sizeof(float), cudaMemcpyHostToDevice);
-	filter_2d_kernel <<<2, 4 >>>(dst_d, src_d, filter_d, f, w, 4);
+	// <<< 블록수, 스레드수, 공유메모리 >>>
+	filter_2d_kernel <<<2, 4, 2*W*sizeof(float) >>>(dst_d, src_d, filter_d, f, w, 4);
 	cudaMemcpy(dst_h, dst_d, out_length*sizeof(float), cudaMemcpyDeviceToHost);
 	for (int i = 0; i < out_length; i++)
 		printf("%d %f\n", i, dst_h[i]);
@@ -238,15 +244,30 @@ __global__ void max_kernel(float *dst, float *src){
 	//src[tx];
 	printf("%f %f \n", dst[0], src[tx]);
 	//float atomicAdd(float *address 값을 누적할 주소, float val 값)	
-	float old = atomicAdd(dst, src[tx]); //속도가 조금 늘립니다. 의외로 빠릅니다.	
+	float old = atomicAdd(dst, src[tx]); //속도가 조금 느리지만 의외로 빠릅니다.	
 	printf("%f %f \n", old, dst[0]);
+}
+//src는 16개 값의 배열
+__global__ void sum_kernel(float *dst, float *src){
+	int tx = threadIdx.x;	
+	extern __shared__ float sm[ ];
+	sm[tx] = src[tx];//각자 데이터 1개씩 옮깁니다. 
+	__syncthreads();// 데이터가 전부 복사될때까지 블록별로 대기
+	//blockDim.x = 16
+	for (int i = 1; i < blockDim.x; i *= 2){//i = { 1, 2, 4, 8, 16(x)}
+		if (tx % 2 * i == 0){ // {2*1의 배수, 2*2 의 배수, 2*4 의 배수, 2*8의 배수
+			sm[tx] = sm[tx] + sm[tx + i];
+		}
+	}
+	if (tx == 0)
+		dst[tx] = sm[tx];
 }
 
 __host__ void atomic_func(){
 	// 원자 연산, 멀티 스레드 환경에서 race condition(경쟁 조건) 문제를 피하기 위해 사용
 	// sum, max, min 등의 작업을 할때 스레드들이 순차적으로 작업을 할 수 있게 해줍니다
 
-	int size = 5;
+	int size = 16;
 	float *src_h, *src_d;
 	float sum_h = 0, *sum_d;
 	src_h = (float*)malloc(size * sizeof(float));	
@@ -255,7 +276,7 @@ __host__ void atomic_func(){
 	for (int i = 0; i < size; i++) src_h[i] = i;//{0,1,2,3,4}
 	cudaMemcpy(src_d, src_h, size * sizeof(float), cudaMemcpyHostToDevice);
 	cudaMemset(sum_d, 0, sizeof(float));
-	max_kernel << <1, size >> >(sum_d, src_d);
+	sum_kernel << <1, size, size*sizeof(float) >> >(sum_d, src_d);
 	cudaMemcpy(&sum_h, sum_d, sizeof(float), cudaMemcpyDeviceToHost);
 	printf("sum : %f \n", sum_h);
 }
@@ -290,11 +311,11 @@ void curand(){
 int main()
 {   	
 	//curand();
-	//atomic_func();
+	atomic_func();
 	//cuda-memcheck 파일명.exe
 	//channel_mean();
 	//device_query();
-	filter_2d();
+	//filter_2d();
 	//filter_1d();
 	//matrix_sum_by_row();
     return 0;// 프로파일링하려면 return 0 으로 끝나야 합니다. 
