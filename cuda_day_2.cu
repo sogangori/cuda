@@ -360,17 +360,16 @@ void stream(){	//3.2.5.5. Streams
 
 const int m = 1000;
 struct AOS{
-	float a[3];
-	float b[3];
-	float c[3];
+	float a[30];
+	float b[30];
+	float c[30];
 };
-
-struct SOA{
-	float a[3][m];
-	float b[3][m];
-	float c[3][m];
+struct SOA{// 구조체를 사용 하지 않는 것이나 마찬가지
+	float a[30][m];
+	float b[30][m];
+	float c[30][m];
 };
-__global__ void AOS_function(AOS *aoss){
+__global__ void AOS_function(AOS *aoss){//4 배 느림 ~ 20 배 느려짐
 	int tx = threadIdx.x;//10개의 쓰레드 
 	AOS aos = aoss[tx];// 쓰레드 하나가 구조체 하나씩 담당해서 작업
 	int sum = aos.a[0] + aos.a[1] + aos.a[2];
@@ -381,8 +380,7 @@ __global__ void SOA_function(SOA *soa){
 	int sum = soa->a[0][tx] + soa->a[1][tx] + soa->a[2][tx];
 	soa->c[0][tx] = sum;
 }
-void data_layout(){
-	
+void data_layout(){	
 	AOS aos[m]; // CPU 에서 효율적
 	SOA soa; // GPU 에서 효율적
 	AOS *aos_d;
@@ -393,14 +391,66 @@ void data_layout(){
 	SOA_function << <1, m >> >(soa_d);
 }
 
+#include <npp.h>
+typedef unsigned char uchar;
+void nppFloatSum()
+{
+	const int w = 2;
+	const int h = 3;
+	const int arraySize = w * h;
+	const float b[arraySize] = { 0, 10, 20, 30, 40, 50 };
+	float* b_d;
+	float* pSum;
+	float nSumHost;
+	cudaMalloc(&b_d, sizeof(float)* arraySize);
+	cudaMalloc((void **)(&pSum), sizeof(float));
+	cudaMemcpy(b_d, b, sizeof(float)* arraySize, cudaMemcpyHostToDevice);
+	uchar * pDeviceBuffer;
+
+	int nBufferSize;
+	nppsSumGetBufferSize_32f(arraySize, &nBufferSize);
+	printf("nppsSumGetBufferSize_32f = %d\n", nBufferSize);
+	// Allocate the scratch buffer
+	cudaMalloc((void **)(&pDeviceBuffer), nBufferSize);
+	nppsSum_32f(b_d, arraySize, pSum, pDeviceBuffer);
+	cudaMemcpy(&nSumHost, pSum, sizeof(float), cudaMemcpyDeviceToHost);
+	printf("float sum = %f\n", nSumHost);
+}
+#include <cufft.h>
+void fft(){
+	//cufft.lib 링커 추가
+	int length = 1000;
+	float2 * src = (float2*)malloc(length*sizeof(float2));
+	for (int i = 0; i < length; i++)
+	{
+		src[i].x = i;//실수
+		src[i].y = 0;//허수
+	}
+	float2 *src_d;
+	cudaMalloc(&src_d, length*sizeof(float2));
+	cudaMemcpy(src_d, src, length*sizeof(float2), cudaMemcpyHostToDevice);
+
+	cufftHandle plan;
+	cufftPlan1d(&plan, length, CUFFT_C2C, 1);//파라미터 셋팅
+	cufftExecC2C(plan, src_d, src_d, CUFFT_INVERSE);//정변환
+	cudaMemcpy(src, src_d, length*sizeof(float2), cudaMemcpyDeviceToHost);
+	for (int i = 0; i < length; i++)
+		printf("%d, real: %f, imag: %f \n", i, src[i].x, src[i].y);
+
+	cudaFree(src_d);
+}
+
 int main()
-{   	
-	data_layout();
+{   
+	curand();
+	fft();
+	nppFloatSum();
+	//data_layout();
 	//GPU - SIMD(T) :Single Instruction(function) Multi Data(Thread)
 	//CPU - MIMD(T) :Multi  Instruction(function) Multi Data(Thread)
 	//stream();
 	//pinned_memory();
-	//curand();
+	
 	//atomic_func();
 	//cuda-memcheck 파일명.exe
 	//channel_mean();
